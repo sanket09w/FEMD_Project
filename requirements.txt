@@ -4,3 +4,5 @@ numpy
 scipy
 nselib
 plotly
+pandas_market_calendars
+requests
