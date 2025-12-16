@@ -98,20 +98,77 @@ if not df.empty:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # --- 2D SLICE VIEW (Standard SVI) ---
+    # ... (inside app.py) ...
+
+    # --- 2D SLICE VIEW & SIGNALS ---
     else:
-        # (This is your existing 2D Logic)
-        st.subheader(f"2D Volatility Smile ({unique_expiries[0]})")
+        st.subheader(f"Analysis for Expiry: {unique_expiries[0]}")
         
-        strikes, market_ivs = [], []
-        for _, row in df.iterrows():
+        # 1. Prepare Data
+        strikes, market_ivs, market_prices = [], [], []
+        clean_rows = []
+        
+        for i, row in df.iterrows():
             iv = get_implied_volatility(row['CE_LTP'], spot_price, row['StrikePrice'], T, 0.1, 0.0, 'CE')
             if not np.isnan(iv) and 0.01 < iv < 2.0:
                 strikes.append(row['StrikePrice'])
                 market_ivs.append(iv)
-                
+                market_prices.append(row['CE_LTP'])
+                clean_rows.append(row)
+        
         if len(strikes) > 5:
+            # 2. Calibrate SVI (The "Fair" Model)
             params = calibrate_svi(strikes, market_ivs, T, spot_price)
+            
+            # --- THE NEW PART: CALCULATE SIGNALS ---
+            from utils.math_model import calculate_fair_price # Import local helper
+            
+            signal_data = []
+            
+            for i, strike in enumerate(strikes):
+                market_p = market_prices[i]
+                
+                # Calculate Fair Price using our new SVI parameters
+                fair_p = calculate_fair_price(spot_price, strike, T, 0.1, 0.0, params, 'CE')
+                
+                # Calculate "Edge" (Profit Potential)
+                # If Market=100, Fair=90 -> Diff=10 -> Overpriced by 11%
+                diff = market_p - fair_p
+                edge_pct = (diff / fair_p) * 100
+                
+                action = "HOLD"
+                if edge_pct > 5.0: action = "SELL (Overvalued)"  # Market is too high
+                elif edge_pct < -5.0: action = "BUY (Undervalued)" # Market is too low
+                
+                signal_data.append({
+                    "Strike": strike,
+                    "Market Price": round(market_p, 2),
+                    "Fair Value": round(fair_p, 2),
+                    "Diff (Rs)": round(diff, 2),
+                    "Edge %": round(edge_pct, 2),
+                    "Signal": action
+                })
+            
+            # 3. Display The Opportunity Radar
+            st.divider()
+            st.markdown("### 🎯 Opportunity Radar")
+            
+            signals_df = pd.DataFrame(signal_data)
+            
+            # Color code the table
+            def color_signals(val):
+                color = 'white'
+                if "SELL" in str(val): color = '#ff4b4b' # Red
+                elif "BUY" in str(val): color = '#0df74b' # Green
+                return f'color: {color}'
+
+            st.dataframe(
+                signals_df.style.map(color_signals, subset=['Signal'])
+                .format({"Edge %": "{:.1f}%"}), 
+                use_container_width=True
+            )
+            
+            # 4. Plot the Curve (Visual Confirmation)
             smooth_strikes = np.linspace(min(strikes), max(strikes), 100)
             k_smooth = np.log(smooth_strikes / spot_price)
             w_smooth = raw_svi_model(k_smooth, *params)
@@ -119,5 +176,8 @@ if not df.empty:
             
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=strikes, y=market_ivs, mode='markers', name='Market IV'))
-            fig.add_trace(go.Scatter(x=smooth_strikes, y=svi_ivs, mode='lines', name='SVI Fit', line=dict(color='cyan')))
+            fig.add_trace(go.Scatter(x=smooth_strikes, y=svi_ivs, mode='lines', name='Fair Value (SVI)', line=dict(color='cyan')))
             st.plotly_chart(fig, use_container_width=True)
+            
+        else:
+            st.warning("Not enough data to calibrate.")
